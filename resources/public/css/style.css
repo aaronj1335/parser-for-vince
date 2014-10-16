@@ -1,0 +1,23 @@
+.App {
+  margin: 20px;
+}
+
+h2 {
+  margin-bottom: 10px;
+}
+
+li {
+  list-style: none;
+}
+
+pre {
+  font-size: 0.8rem;
+  margin-bottom: 10px;
+}
+
+textarea {
+  border-radius: 4px;
+  padding: 5px;
+  margin-bottom: 10px;
+  min-height: 200px;
+}
