@@ -8,42 +8,84 @@
                      {:src "a {b.c.(\"d } e\")} f {c.g.(\"h\")}"}
                      {:src ":{ }:"}]}))
 
-(defn children [parent s]
-  (loop [so-far []
-         temp-accum ""
-         s s]
-    (case (first s)
-      nil (if (empty? temp-accum)
-            [so-far s]
-            [(conj so-far {:type :text :value temp-accum}) s])
-      "{" (let [new-node {:type :block}
-                rest-of-s (apply str (rest s))
-                [grand-children remaining] (children new-node rest-of-s)
-                new-node-with-children (assoc new-node :children grand-children)
-                so-far-with-text (if (seq temp-accum)
-                                   (conj so-far {:type :text :value temp-accum})
-                                   so-far)]
-            (recur (conj so-far-with-text new-node-with-children) "" remaining))
-      "}" (if (= (:type parent) :block)
-            (let [so-far-with-text (if (seq temp-accum)
-                                     (conj so-far {:type :token :value temp-accum})
-                                     so-far)]
-              [so-far-with-text (apply str (rest s))])
-            (recur so-far (str temp-accum "}") (apply str (rest s))))
-      "\"" (if (= (:type parent) :string)
-             [(conj so-far {:type :text :value temp-accum}) (apply str (rest s))]
-             (if (= (:type parent) :block)
-               (let [new-node {:type :string}
-                     rest-of-s (apply str (rest s))
-                     [grand-children remaining] (children new-node rest-of-s)
-                     new-node-with-children (assoc new-node :children grand-children)
-                     so-far-with-text (if (empty? temp-accum)
-                                       so-far
-                                       (conj so-far {:type :text :value temp-accum}))]
-                 (recur (conj so-far-with-text new-node-with-children) "" remaining))
-               (recur so-far (str temp-accum (first s)) (apply str (rest s)))
-               ))
-      (recur so-far (str temp-accum (first s)) (apply str (rest s))))))
+(defn lex
+  ([s] (lex s '()))
+  ([s states]
+    (case (first states)
+      nil (case (first s)
+        nil nil
+        "{" (conj (lex (rest s) (conj states :block)) {:type :l-curly})
+        (conj (lex (drop-while #(not= "{" %) s) states)
+              {:type :text
+               :value (apply str (take-while #(not= "{" %) s))}))
+      :block (case (first s)
+        nil nil
+        "}" (conj (lex (rest s) (rest states)) {:type :r-curly})
+        "(" (conj (lex (rest s) (conj states :param-list)) {:type :l-paren})
+        (conj (lex (drop-while #(not (#{"(" "}"} %)) s) states)
+              {:type :token
+               :value (apply str (take-while #(not (#{"(" "}"} %)) s))}))
+      :param-list (case (first s)
+        nil nil
+        ")" (conj (lex (rest s) (rest states)) {:type :r-paren})
+        (conj (lex (drop-while #(not= ")" %) s) states)
+              {:type :param
+               :value (apply str (take-while #(not= ")" %) s))}))
+      nil)))
+
+(defn parse
+  ([tokens] (parse tokens {:type :program}))
+  ([tokens cur-node]
+   (case (:type cur-node)
+     :program (case (:type (first tokens))
+       :text (let [; the :text token looks the same as the :text node, so
+                   ; re-use it
+                   new-node (first tokens)
+                   new-children (conj (:children cur-node []) new-node)
+                   with-new-node (assoc cur-node :children new-children)]
+               (parse (rest tokens) with-new-node))
+       :l-curly (let [[block-node remaining-tokens]
+                       (parse (rest tokens) {:type :block})
+                      new-children (conj (:children cur-node []) block-node)
+                      with-new-node (assoc cur-node :children new-children)]
+                  (parse remaining-tokens with-new-node))
+       nil [cur-node tokens])
+     :block (case (:type (first tokens))
+       :token (let [; similar to the :text token, :token tokens look the same
+                    ; as :token nodes, so re-use them as well
+                    new-node (first tokens)
+                    new-children (conj (:children cur-node []) new-node)
+                    with-new-node (assoc cur-node :children new-children)]
+                (parse (rest tokens) with-new-node))
+       :l-paren (let [[param-list-node remaining-tokens]
+                       (parse (rest tokens) {:type :param-list})
+                      new-children (conj (:children cur-node []) param-list-node)
+                      with-new-node (assoc cur-node :children new-children)]
+                  (parse remaining-tokens with-new-node))
+       :r-curly [cur-node (rest tokens)])
+     :param-list (case (:type (first tokens))
+       :param (let [; and just like :token and :text, :token tokens look the
+                    ; same as :token nodes, so re-use them as well
+                    new-node (first tokens)
+                    new-children (conj (:children cur-node []) new-node)
+                    with-new-node (assoc cur-node :children new-children)]
+                (parse (rest tokens) with-new-node))
+       :r-paren [cur-node (rest tokens)]))))
+
+(defn lex-view [template owner]
+  (reify
+    om/IRender
+    (render [_]
+      (dom/li #js {:className "Grid Grid--withGutter"}
+        (dom/div #js {:className "Grid-cell u-size1of2"}
+          (dom/textarea
+            #js {:value (:src template)
+                 :className "u-sizeFull"
+                 :onChange #(om/update! template {:src (.. % -target -value)})}))
+        (dom/div #js {:className "Grid-cell u-size1of2"}
+          (dom/pre nil
+            (let [tokens (lex (:src template))]
+              (.stringify js/JSON (clj->js tokens) nil 2))))))))
 
 (defn parse-view [template owner]
   (reify
@@ -57,8 +99,9 @@
                  :onChange #(om/update! template {:src (.. % -target -value)})}))
         (dom/div #js {:className "Grid-cell u-size1of2"}
           (dom/pre nil
-            (let [[tree _] (children {:type :root} (:src template))]
-              (JSON/stringify (clj->js tree) nil 2))))))))
+            (let [[tree _] (parse (lex (:src template)))]
+            ; (let [[tree _] (children {:type :root} (:src template))]
+              (.stringify js/JSON (clj->js tree) nil 2))))))))
 
 (defn main []
   (om/root
@@ -68,7 +111,16 @@
         (render [_]
           (dom/div #js {:className "App"}
             (dom/h2 nil "Vince's Damn Parser")
-            (apply dom/ul nil
-              (om/build-all parse-view (:templates app)))))))
+            (dom/div
+              nil
+              (apply dom/ul nil (om/build-all lex-view (:templates app))))
+            (dom/div
+              nil
+              (apply dom/ul nil (om/build-all parse-view (:templates app))))
+            ))))
     app-state
     {:target (. js/document (getElementById "app"))}))
+
+; (swap! app-state assoc :templates [{:src "something {x.y.(\"foo\")} something else"}
+;                                     {:src "a {b.c.(\"d } e\")} f {c.g.(\"h\")}"}
+;                                     {:src ":{ }:"}])
